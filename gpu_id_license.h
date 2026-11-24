@@ -805,8 +805,6 @@ static int st_read_paste_stdin(char **out_text, size_t *out_len, char *err, size
 #else
     if (isatty(STDIN_FILENO)) {
         tty_prompted = 1;
-        fputs("Paste license code: ", stderr);
-        fflush(stderr);
 
         struct termios orig_tio;
         int have_tio = (tcgetattr(STDIN_FILENO, &orig_tio) == 0);
@@ -823,6 +821,10 @@ static int st_read_paste_stdin(char **out_text, size_t *out_len, char *err, size
         sigemptyset(&sa.sa_mask);
         st_paste_sigint = 0;
         int have_sa = (sigaction(SIGINT, &sa, &old_sa) == 0);
+
+        /* Emit the prompt only after raw/no-echo mode is active so immediate pastes never leak plaintext. */
+        fputs("Paste license code: ", stderr);
+        fflush(stderr);
 
         int line_has_nonws = 0, prev_cr = 0, done = 0;
         unsigned char chunk[1024];
