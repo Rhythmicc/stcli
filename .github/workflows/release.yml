@@ -97,7 +97,7 @@ jobs:
             elf_machine: RISC-V
             max_glibc: '2.27'
             cross_pkg: libc6-riscv64-cross
-            qemu_cmd: 'qemu-riscv64-static -L /usr/riscv64-linux-gnu'
+            qemu_cmd: 'qemu-riscv64 -L /usr/riscv64-linux-gnu'
           - arch: loongarch64
             binary: stcli-linux-loongarch64
             elf_machine: LoongArch
@@ -132,7 +132,7 @@ jobs:
         if: matrix.cross_pkg != ''
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qemu-user-static "${{ matrix.cross_pkg }}"
+          sudo apt-get install -y --no-install-recommends qemu-user "${{ matrix.cross_pkg }}"
           BIN="${PWD}/dist/${{ matrix.binary }}"
           ${{ matrix.qemu_cmd }} "$BIN" --version
           ${{ matrix.qemu_cmd }} "$BIN" --help
