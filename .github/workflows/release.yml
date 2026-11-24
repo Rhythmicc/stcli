@@ -1,0 +1,180 @@
+name: stcli multi-arch release
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Cross-compile all ISAs (Zig)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.1
+
+      - name: Build release binaries
+        run: |
+          zig version
+          bash build.sh
+          file stcli-*
+
+      - name: Package clean source tarball & SHA256SUMS
+        shell: bash
+        run: |
+          mkdir -p dist
+          VER=$(sed -n 's/^#define VERSION "\([^"]*\)"/\1/p' gpu_id.c | head -n1)
+          STAGE=$(mktemp -d)
+          SRC_DIR="$STAGE/stcli-$VER"
+          mkdir -p "$SRC_DIR"
+          cp LICENSE README.md build.sh build-sycl.sh gpu_id.c gpu_id_backend.h gpu_id_vendor.h gpu_id_license.h gpu_id_license_code.h gpu_id_sycl.cpp driver_fixture.c exit_fixture.c test_helper.py test_license_apply.py test_license_paste.py validate_hardware.py validate_sycl_sdk.py "$SRC_DIR/"
+          tar --sort=name --owner=0 --group=0 --numeric-owner -czf "dist/stcli-source-${VER}.tar.gz" -C "$STAGE" "stcli-$VER"
+          cp stcli-linux-* stcli-windows-x86_64.exe dist/
+          cp README.md dist/README.txt
+          (cd dist && sha256sum stcli-linux-* stcli-windows-x86_64.exe "stcli-source-${VER}.tar.gz" README.txt > SHA256SUMS)
+          (cd dist && sha256sum -c SHA256SUMS)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stcli-dist
+          path: dist/
+
+  test-linux-x86_64:
+    name: Native test (Linux x86_64)
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: stcli-dist
+          path: dist
+      - name: Run helper, apply, and paste test suites
+        run: |
+          chmod +x dist/stcli-linux-x86_64
+          ./dist/stcli-linux-x86_64 --version
+          STCLI_BINARY="${PWD}/dist/stcli-linux-x86_64" python3 test_helper.py
+          STCLI_BINARY="${PWD}/dist/stcli-linux-x86_64" python3 test_license_apply.py
+          STCLI_BINARY="${PWD}/dist/stcli-linux-x86_64" python3 test_license_paste.py
+
+  test-linux-arm64:
+    name: Native test (Linux ARM64)
+    needs: build
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: stcli-dist
+          path: dist
+      - name: Run helper, apply, and paste test suites on native ARM64
+        run: |
+          chmod +x dist/stcli-linux-aarch64
+          ./dist/stcli-linux-aarch64 --version
+          STCLI_BINARY="${PWD}/dist/stcli-linux-aarch64" python3 test_helper.py
+          STCLI_BINARY="${PWD}/dist/stcli-linux-aarch64" python3 test_license_apply.py
+          STCLI_BINARY="${PWD}/dist/stcli-linux-aarch64" python3 test_license_paste.py
+
+  test-linux-cross-elf:
+    name: ELF & QEMU verify (${{ matrix.arch }})
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - arch: riscv64
+            binary: stcli-linux-riscv64
+            elf_machine: RISC-V
+            max_glibc: '2.27'
+            cross_pkg: libc6-riscv64-cross
+            qemu_cmd: 'qemu-riscv64-static -L /usr/riscv64-linux-gnu'
+          - arch: loongarch64
+            binary: stcli-linux-loongarch64
+            elf_machine: LoongArch
+            max_glibc: '2.36'
+            cross_pkg: ''
+            qemu_cmd: ''
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: stcli-dist
+          path: dist
+
+      - name: Verify ELF architecture and GLIBC baseline
+        run: |
+          BIN="dist/${{ matrix.binary }}"
+          chmod +x "$BIN"
+          readelf -h "$BIN" | grep -E "Class:|Data:|Machine:"
+          readelf -h "$BIN" | grep -q "ELF64"
+          readelf -h "$BIN" | grep -q "2's complement, little endian"
+          readelf -h "$BIN" | grep -q "${{ matrix.elf_machine }}"
+          python3 - "$BIN" "${{ matrix.max_glibc }}" <<'PY'
+          import re, subprocess, sys
+          out = subprocess.check_output(["readelf", "--version-info", sys.argv[1]], text=True)
+          max_req = tuple(int(x) for x in sys.argv[2].split("."))
+          vers = [tuple(int(p) for p in m.split(".")) for m in re.findall(r"GLIBC_(\d+\.\d+(?:\.\d+)?)", out)]
+          print("GLIBC symbols required:", sorted(set(vers)))
+          assert vers and all(v[:2] <= max_req for v in vers), f"Exceeded {max_req}: {vers}"
+          PY
+
+      - name: Run cross-arch CLI tests under QEMU user-mode
+        if: matrix.cross_pkg != ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-user-static "${{ matrix.cross_pkg }}"
+          BIN="${PWD}/dist/${{ matrix.binary }}"
+          ${{ matrix.qemu_cmd }} "$BIN" --version
+          ${{ matrix.qemu_cmd }} "$BIN" --help
+          WRAP=$(mktemp)
+          printf '#!/bin/sh\nexec %s "%s" "$@"\n' "${{ matrix.qemu_cmd }}" "$BIN" > "$WRAP"
+          chmod +x "$WRAP"
+          STCLI_BINARY="$WRAP" python3 test_license_apply.py
+          STCLI_BINARY="$WRAP" python3 test_license_paste.py
+
+  test-windows-x64:
+    name: Native test (Windows x64)
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: stcli-dist
+          path: dist
+      - name: Run Windows smoke, apply, and paste tests
+        shell: pwsh
+        run: |
+          $bin = "$PWD\dist\stcli-windows-x86_64.exe"
+          & $bin --version
+          & $bin --help
+          $env:STCLI_BINARY = $bin
+          python test_license_apply.py
+          python test_license_paste.py
+
+  release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, test-linux-x86_64, test-linux-arm64, test-linux-cross-elf, test-windows-x64]
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: stcli-dist
+          path: dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

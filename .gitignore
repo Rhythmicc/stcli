@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+*.o
+*.pdb
+dist/
+stcli
+stcli-linux-*
+stcli-windows-*
+stcli-source-*.tar.gz
